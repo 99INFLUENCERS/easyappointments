@@ -119,7 +119,7 @@ class Appointments_model extends EA_Model
 
                 if (
                     $single_attendant &&
-                    $this->has_provider_conflict(
+                    $this->has_locked_provider_conflict(
                         (int) $appointment['id_users_provider'],
                         $appointment['start_datetime'],
                         $appointment['end_datetime'],
@@ -816,6 +816,35 @@ class Appointments_model extends EA_Model
      *
      * @return bool Returns true if there is a conflict, false otherwise.
      */
+    /**
+     * cassien fork: overlap check as a LOCKING read (SELECT ... FOR UPDATE).
+     *
+     * Under REPEATABLE READ a plain SELECT reads the transaction snapshot, which may predate the provider lock and
+     * miss a row committed by a concurrent writer meanwhile. A locking read always reads the latest committed data.
+     * Includes unavailabilities, like has_provider_conflict().
+     */
+    public function has_locked_provider_conflict(
+        int $provider_id,
+        string $start_datetime,
+        string $end_datetime,
+        ?int $exclude_appointment_id = null,
+    ): bool {
+        $sql =
+            'SELECT id FROM ' .
+            $this->db->dbprefix('appointments') .
+            ' WHERE id_users_provider = ? AND start_datetime < ? AND end_datetime > ?' .
+            ($exclude_appointment_id ? ' AND id <> ?' : '') .
+            ' FOR UPDATE';
+
+        $params = [$provider_id, $end_datetime, $start_datetime];
+
+        if ($exclude_appointment_id) {
+            $params[] = $exclude_appointment_id;
+        }
+
+        return $this->db->query($sql, $params)->num_rows() > 0;
+    }
+
     public function has_provider_conflict(
         int $provider_id,
         string $start_datetime,

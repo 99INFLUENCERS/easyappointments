@@ -253,7 +253,10 @@ class Google extends EA_Controller
                     $google_event = $CI->google_sync->get_event($provider, $local_event['id_google_calendar']);
 
                     if ($google_event->getStatus() == 'cancelled') {
-                        throw new Exception('Event is cancelled, remove the record from Easy!Appointments.');
+                        // cassien fork: explicit cancellation deletes directly (the generic catch below only logs).
+                        $events_model->delete($local_event['id']);
+
+                        continue;
                     }
 
                     // Honour the Google Calendar "Free" (transparent) flag. Scoped to unavailabilities on purpose:
@@ -262,7 +265,9 @@ class Google extends EA_Controller
                         $local_event['is_unavailability'] &&
                         strcasecmp((string) $google_event->getTransparency(), 'transparent') === 0
                     ) {
-                        throw new Exception('Event is marked free in Google Calendar, remove the record.');
+                        $events_model->delete($local_event['id']);
+
+                        continue;
                     }
 
                     // If Google Calendar event is different from Easy!Appointments appointment then update Easy!Appointments record.

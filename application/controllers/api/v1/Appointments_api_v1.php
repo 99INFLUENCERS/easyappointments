@@ -481,7 +481,7 @@ class Appointments_api_v1 extends EA_Controller
             $is_available = in_array($start->format('H:i'), $available_hours, true);
 
             if ($is_available && (int) ($service['attendants_number'] ?? 1) <= 1) {
-                $is_available = !$this->appointments_model->has_provider_conflict(
+                $is_available = !$this->appointments_model->has_locked_provider_conflict(
                     $provider_id,
                     $start->format('Y-m-d H:i:s'),
                     $end->format('Y-m-d H:i:s'),
