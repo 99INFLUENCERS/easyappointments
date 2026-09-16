@@ -16,6 +16,13 @@
  *
  * @package Models
  */
+if (!class_exists('Appointment_conflict_exception')) {
+    /**
+     * cassien fork: raised when a write would double-book a single-attendant provider.
+     */
+    class Appointment_conflict_exception extends RuntimeException {}
+}
+
 class Appointments_model extends EA_Model
 {
     /**
@@ -63,10 +70,83 @@ class Appointments_model extends EA_Model
     {
         $this->validate($appointment);
 
-        if (empty($appointment['id'])) {
-            return $this->insert($appointment);
-        } else {
-            return $this->update($appointment);
+        // cassien fork: unavailabilities are allowed to overlap (the operator blocks time on purpose).
+        if (!empty($appointment['is_unavailability'])) {
+            return empty($appointment['id']) ? $this->insert($appointment) : $this->update($appointment);
+        }
+
+        // cassien fork: ONE guarded write path for every writer (REST API, backend calendar, Google sync).
+        // Inside a transaction: lock the appointment row (updates) and the provider rows (old + new, ascending id
+        // order), then refuse any overlap for single-attendant services. Writes that keep provider/start/end
+        // unchanged skip the overlap check (a notes edit must not fail because of a later personal event).
+        $this->db->trans_begin();
+
+        try {
+            $original = null;
+
+            if (!empty($appointment['id'])) {
+                $original = $this->db
+                    ->query('SELECT * FROM ' . $this->db->dbprefix('appointments') . ' WHERE id = ? FOR UPDATE', [
+                        (int) $appointment['id'],
+                    ])
+                    ->row_array();
+            }
+
+            $provider_ids = [(int) $appointment['id_users_provider']];
+
+            if ($original && (int) $original['id_users_provider'] !== $provider_ids[0]) {
+                $provider_ids[] = (int) $original['id_users_provider'];
+            }
+
+            sort($provider_ids);
+
+            foreach ($provider_ids as $provider_id) {
+                $this->db->query('SELECT id FROM ' . $this->db->dbprefix('users') . ' WHERE id = ? FOR UPDATE', [
+                    $provider_id,
+                ]);
+            }
+
+            $unchanged_slot =
+                $original &&
+                (int) $original['id_users_provider'] === (int) $appointment['id_users_provider'] &&
+                $original['start_datetime'] === $appointment['start_datetime'] &&
+                $original['end_datetime'] === $appointment['end_datetime'];
+
+            if (!$unchanged_slot) {
+                $service = $this->db->get_where('services', ['id' => (int) $appointment['id_services']])->row_array();
+
+                $single_attendant = (int) ($service['attendants_number'] ?? 1) <= 1;
+
+                if (
+                    $single_attendant &&
+                    $this->has_provider_conflict(
+                        (int) $appointment['id_users_provider'],
+                        $appointment['start_datetime'],
+                        $appointment['end_datetime'],
+                        !empty($appointment['id']) ? (int) $appointment['id'] : null,
+                    )
+                ) {
+                    $this->db->trans_rollback();
+
+                    $message = function_exists('lang') ? lang('provider_has_conflicting_appointment') : '';
+
+                    throw new Appointment_conflict_exception(
+                        $message ?: 'The provider already has an appointment at the requested time.',
+                    );
+                }
+            }
+
+            $appointment_id = empty($appointment['id']) ? $this->insert($appointment) : $this->update($appointment);
+
+            $this->db->trans_commit();
+
+            return $appointment_id;
+        } catch (Appointment_conflict_exception $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            $this->db->trans_rollback();
+
+            throw $e;
         }
     }
 

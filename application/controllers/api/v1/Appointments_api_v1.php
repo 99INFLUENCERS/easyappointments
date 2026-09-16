@@ -291,9 +291,19 @@ class Appointments_api_v1 extends EA_Controller
     public function update(int $id): void
     {
         try {
-            $occurrences = $this->appointments_model->get(['id' => $id]);
+            // cassien fork: lock and re-read the record before merging the partial update, so a stale read can never
+            // restore an old time slot (lost update -> double booking).
+            $this->db->trans_begin();
+
+            $locked = $this->db
+                ->query('SELECT id FROM ' . $this->db->dbprefix('appointments') . ' WHERE id = ? FOR UPDATE', [$id])
+                ->row_array();
+
+            $occurrences = $locked ? $this->appointments_model->get(['id' => $id]) : [];
 
             if (empty($occurrences)) {
+                $this->db->trans_rollback();
+
                 response('', 404);
 
                 return;
@@ -305,7 +315,19 @@ class Appointments_api_v1 extends EA_Controller
 
             $this->appointments_model->api_decode($appointment, $original_appointment);
 
-            $appointment_id = $this->save_with_slot_guard($appointment, $original_appointment);
+            try {
+                $appointment_id = $this->save_with_slot_guard($appointment, $original_appointment);
+            } catch (Throwable $e) {
+                $this->db->trans_rollback();
+
+                throw $e;
+            }
+
+            if ($appointment_id === null) {
+                $this->db->trans_rollback();
+            } else {
+                $this->db->trans_commit();
+            }
 
             if ($appointment_id === null) {
                 json_response(['message' => 'The requested time slot is no longer available.'], 409);
@@ -415,7 +437,11 @@ class Appointments_api_v1 extends EA_Controller
             $original_appointment['start_datetime'] === ($appointment['start_datetime'] ?? null) &&
             $original_appointment['end_datetime'] === ($appointment['end_datetime'] ?? null)
         ) {
-            return $this->appointments_model->save($appointment);
+            try {
+                return $this->appointments_model->save($appointment);
+            } catch (Appointment_conflict_exception) {
+                return null;
+            }
         }
 
         $provider_id = (int) ($appointment['id_users_provider'] ?? 0);
@@ -425,9 +451,19 @@ class Appointments_api_v1 extends EA_Controller
         $this->db->trans_begin();
 
         try {
-            $this->db->query('SELECT id FROM ' . $this->db->dbprefix('users') . ' WHERE id = ? FOR UPDATE', [
-                $provider_id,
-            ]);
+            $lock_ids = [$provider_id];
+
+            if ($original_appointment !== null && (int) $original_appointment['id_users_provider'] !== $provider_id) {
+                $lock_ids[] = (int) $original_appointment['id_users_provider'];
+            }
+
+            sort($lock_ids);
+
+            foreach ($lock_ids as $lock_id) {
+                $this->db->query('SELECT id FROM ' . $this->db->dbprefix('users') . ' WHERE id = ? FOR UPDATE', [
+                    $lock_id,
+                ]);
+            }
 
             $provider = $this->providers_model->find($provider_id);
             $service = $this->services_model->find($service_id);
@@ -459,7 +495,13 @@ class Appointments_api_v1 extends EA_Controller
                 return null;
             }
 
-            $appointment_id = $this->appointments_model->save($appointment);
+            try {
+                $appointment_id = $this->appointments_model->save($appointment);
+            } catch (Appointment_conflict_exception) {
+                $this->db->trans_rollback();
+
+                return null;
+            }
 
             $this->db->trans_commit();
 

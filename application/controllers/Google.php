@@ -197,6 +197,12 @@ class Google extends EA_Controller
                                 continue;
                             }
 
+                            // cassien fork: a customer booking is never linked to a Google event just because the
+                            // times match (it could be an unrelated personal event that later edits/deletes).
+                            if (!$local_event['is_unavailability']) {
+                                continue;
+                            }
+
                             // For unavailabilities require the synthetic "Unavailable" summary
                             // to avoid hijacking unrelated Google events that just happen to
                             // overlap the same time window.
@@ -333,11 +339,14 @@ class Google extends EA_Controller
                     $events_model->delete($local_event['id']);
 
                     $local_event['id_google_calendar'] = null;
-                } catch (Throwable) {
-                    // Appointment not found on Google Calendar, delete from Easy!Appointments.
-                    $events_model->delete($local_event['id']);
-
-                    $local_event['id_google_calendar'] = null;
+                } catch (Throwable $e) {
+                    // cassien fork: only an explicit Google 404/410 (above) or a cancelled event deletes a booking.
+                    // Any other failure (an invalid incoming change, an overlap refused by the guarded write) keeps
+                    // the local appointment untouched and is logged for the operator.
+                    log_message(
+                        'error',
+                        'Google sync kept local event ' . $local_event['id'] . ' after error: ' . $e->getMessage(),
+                    );
                 }
             }
 
