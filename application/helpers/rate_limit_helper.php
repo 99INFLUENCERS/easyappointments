@@ -36,6 +36,15 @@ if (!function_exists('rate_limit')) {
             return;
         }
 
+        // cassien fork: the Booking Gateway is the only API client and reaches the instance from the docker bridge
+        // gateway address without X-Forwarded-For; it does its own per-visitor rate limiting. Browser traffic comes
+        // through the reverse proxy with X-Forwarded-For (mod_remoteip), so it keeps being limited per real client IP.
+        if (defined('Config::RATE_LIMIT_EXEMPT_IPS') && Config::RATE_LIMIT_EXEMPT_IPS !== '') {
+            if (in_array($ip, array_map('trim', explode(',', Config::RATE_LIMIT_EXEMPT_IPS)), true)) {
+                return;
+            }
+        }
+
         $CI->load->driver('cache', ['adapter' => 'file']);
 
         $cache_key = str_replace(':', '', 'rate_limit_key_' . $ip);
