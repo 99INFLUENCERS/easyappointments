@@ -80,7 +80,7 @@ class About extends EA_Controller
         $role_slug = session('role_slug');
 
         // Fetch blog posts from RSS feed
-        $blog_posts = $this->fetch_blog_posts();
+        $blog_posts = []; // cassien fork: no remote vendor feed from our clients' admin panels.
 
         script_vars([
             'user_id' => $user_id,

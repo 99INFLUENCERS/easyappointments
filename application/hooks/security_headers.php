@@ -42,6 +42,12 @@ function add_security_headers(): void
             "form-action 'self'",
     );
 
+    // cassien fork: when the public booking funnel is disabled nothing of this installation is meant to be framed, so
+    // framing is restricted to the same origin with the standard directive as well.
+    if (defined('Config::PUBLIC_BOOKING_URL') && Config::PUBLIC_BOOKING_URL !== '') {
+        header("Content-Security-Policy: frame-ancestors 'self'", false);
+    }
+
     // Referrer policy for privacy
     header('Referrer-Policy: strict-origin-when-cross-origin');
 

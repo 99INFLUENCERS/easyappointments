@@ -35,6 +35,7 @@ class Appointments_api_v1 extends EA_Controller
         $this->load->library('webhooks_client');
         $this->load->library('synchronization');
         $this->load->library('notifications');
+        $this->load->library('availability');
 
         $this->api->auth();
 
@@ -220,7 +221,13 @@ class Appointments_api_v1 extends EA_Controller
                 $appointment['end_datetime'] = $this->appointments_model->calculate_end_datetime($appointment);
             }
 
-            $appointment_id = $this->appointments_model->save($appointment);
+            $appointment_id = $this->save_with_slot_guard($appointment);
+
+            if ($appointment_id === null) {
+                json_response(['message' => 'The requested time slot is no longer available.'], 409);
+
+                return;
+            }
 
             $created_appointment = $this->appointments_model->find($appointment_id);
 
@@ -298,7 +305,13 @@ class Appointments_api_v1 extends EA_Controller
 
             $this->appointments_model->api_decode($appointment, $original_appointment);
 
-            $appointment_id = $this->appointments_model->save($appointment);
+            $appointment_id = $this->save_with_slot_guard($appointment, $original_appointment);
+
+            if ($appointment_id === null) {
+                json_response(['message' => 'The requested time slot is no longer available.'], 409);
+
+                return;
+            }
 
             $updated_appointment = $this->appointments_model->find($appointment_id);
 
@@ -365,6 +378,96 @@ class Appointments_api_v1 extends EA_Controller
             response('', 204);
         } catch (Throwable $e) {
             json_exception($e);
+        }
+    }
+
+    /**
+     * Save an appointment only if its time slot is still bookable (cassien fork).
+     *
+     * The upstream API saves appointments without any overlap or working plan validation, while the public booking page
+     * and the backend calendar do validate. This guard closes that gap for API writes:
+     *
+     *  1. The provider row is locked (SELECT ... FOR UPDATE) inside a transaction, so concurrent API writes for the same
+     *     provider are serialized and the check-then-insert race (TOCTOU) cannot produce a double booking.
+     *  2. The requested start time must be one of the hours returned by the Availability library (same engine as the
+     *     public booking page: working plan, exceptions, breaks, blocked periods, existing appointments).
+     *  3. The overlap check (has_provider_conflict) is applied on top for single-attendant services.
+     *
+     * Unavailability records and updates that keep the same provider/service/time are saved without the slot checks.
+     *
+     * @param array $appointment Decoded appointment data.
+     * @param array|null $original_appointment Original record when updating.
+     *
+     * @return int|null Returns the appointment ID or null when the slot is not available.
+     *
+     * @throws Throwable
+     */
+    private function save_with_slot_guard(array $appointment, ?array $original_appointment = null): ?int
+    {
+        if (!empty($appointment['is_unavailability'])) {
+            return $this->appointments_model->save($appointment);
+        }
+
+        if (
+            $original_appointment !== null &&
+            (int) $original_appointment['id_users_provider'] === (int) ($appointment['id_users_provider'] ?? 0) &&
+            (int) $original_appointment['id_services'] === (int) ($appointment['id_services'] ?? 0) &&
+            $original_appointment['start_datetime'] === ($appointment['start_datetime'] ?? null) &&
+            $original_appointment['end_datetime'] === ($appointment['end_datetime'] ?? null)
+        ) {
+            return $this->appointments_model->save($appointment);
+        }
+
+        $provider_id = (int) ($appointment['id_users_provider'] ?? 0);
+        $service_id = (int) ($appointment['id_services'] ?? 0);
+        $exclude_id = $original_appointment !== null ? (int) $original_appointment['id'] : null;
+
+        $this->db->trans_begin();
+
+        try {
+            $this->db->query('SELECT id FROM ' . $this->db->dbprefix('users') . ' WHERE id = ? FOR UPDATE', [
+                $provider_id,
+            ]);
+
+            $provider = $this->providers_model->find($provider_id);
+            $service = $this->services_model->find($service_id);
+
+            $start = new DateTime($appointment['start_datetime']);
+            $end = new DateTime($appointment['end_datetime']);
+
+            $available_hours = $this->availability->get_available_hours(
+                $start->format('Y-m-d'),
+                $service,
+                $provider,
+                $exclude_id,
+            );
+
+            $is_available = in_array($start->format('H:i'), $available_hours, true);
+
+            if ($is_available && (int) ($service['attendants_number'] ?? 1) <= 1) {
+                $is_available = !$this->appointments_model->has_provider_conflict(
+                    $provider_id,
+                    $start->format('Y-m-d H:i:s'),
+                    $end->format('Y-m-d H:i:s'),
+                    $exclude_id,
+                );
+            }
+
+            if (!$is_available) {
+                $this->db->trans_rollback();
+
+                return null;
+            }
+
+            $appointment_id = $this->appointments_model->save($appointment);
+
+            $this->db->trans_commit();
+
+            return $appointment_id;
+        } catch (Throwable $e) {
+            $this->db->trans_rollback();
+
+            throw $e;
         }
     }
 }

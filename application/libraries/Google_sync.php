@@ -111,7 +111,7 @@ class Google_sync
         $this->client->setApplicationName('Easy!Appointments');
         $this->client->setClientId($this->get_client_id());
         $this->client->setClientSecret($this->get_client_secret());
-        $this->client->setRedirectUri(site_url('google/oauth_callback'));
+        $this->client->setRedirectUri(config('google_redirect_uri') ?: site_url('google/oauth_callback'));
         $this->client->setPrompt('consent');
         $this->client->setAccessType('offline');
         $this->client->addScope([Google_Service_Calendar::CALENDAR]);

@@ -493,6 +493,11 @@ class Google extends EA_Controller
         // Generate and store OAuth state parameter to prevent CSRF
         $oauth_state = bin2hex(random_bytes(32));
 
+        // cassien fork: prefix the state with the tenant slug for the central OAuth callback of the Booking Gateway.
+        if (config('tenant_slug')) {
+            $oauth_state = config('tenant_slug') . '.' . $oauth_state;
+        }
+
         // Store the provider id and state for use on the callback function.
         session([
             'oauth_provider_id' => $provider_id,

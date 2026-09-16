@@ -27,6 +27,12 @@ class Booking_cancellation extends EA_Controller
     {
         parent::__construct();
 
+        // cassien fork: the stock public booking funnel is never shown; visitors go to our own booker.
+        if (defined('Config::PUBLIC_BOOKING_URL') && Config::PUBLIC_BOOKING_URL !== '') {
+            header('Location: ' . Config::PUBLIC_BOOKING_URL, true, 302);
+            exit();
+        }
+
         $this->load->model('appointments_model');
         $this->load->model('providers_model');
         $this->load->model('services_model');
